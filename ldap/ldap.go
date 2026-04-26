@@ -2,6 +2,7 @@ package ldap // collector, wraps existing bloodhound types for seamless collecti
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -53,12 +54,9 @@ func DiscoverDC(domain string, dnsServer string) (string, error) {
 }
 
 // create a new ldap client from cli results
+
 func NewClient(results CLI.CLIResults) (l *ldap.Conn, err error) {
 	ldaps := results.Ldaps
-	protocol := "ldap://"
-	if ldaps {
-		protocol = "ldaps://"
-	}
 	kerb := results.Kerberos
 	user := results.Username
 	password := results.Password
@@ -69,42 +67,115 @@ func NewClient(results CLI.CLIResults) (l *ldap.Conn, err error) {
 	}
 	domain := results.Domain
 	if domain == "" {
-		err = errors.New("domain not specified")
-		return
+		return nil, errors.New("domain not specified")
 	}
-	ldapURL := fmt.Sprintf("%s%s:%s", protocol, dc, results.Port)
-	l, err = ldap.DialURL(ldapURL)
+
+	address := fmt.Sprintf("%s:%s", dc, results.Port)
+
+	if ldaps {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true,
+		}
+		l, err = ldap.DialTLS("tcp", address, tlsConfig)
+	} else {
+		l, err = ldap.Dial("tcp", address)
+	}
+
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	if kerb {
 		dc, err = DiscoverDC(domain, dc)
 		if err != nil {
-			return nil, err
+			log.Warn(fmt.Sprintf("failed to discover DC.. %v", err))
 		}
 		spn, krb5Conf := kerberos.KerberosInit(dc, domain)
 		realm := strings.ToUpper(domain)
+
 		client := gssapi.Client{
-			Client: krb5client.NewWithPassword(user, realm, password, krb5Conf, krb5client.DisablePAFXFAST(true)),
+			Client: krb5client.NewWithPassword(
+				user,
+				realm,
+				password,
+				krb5Conf,
+				krb5client.DisablePAFXFAST(true),
+			),
 		}
+
 		err = l.GSSAPIBindRequest(&client, &ldap.GSSAPIBindRequest{
 			ServicePrincipalName: spn,
 			AuthZID:              "",
 		})
 		if err == nil {
-			return
+			return l, nil
 		}
+
 		log.Info("Falling back to ntlm auth..")
 	}
+
 	if password != "" {
 		err = l.Bind(user, password)
 	} else {
 		err = l.NTLMBindWithHash(domain, user, ntlm)
 	}
 
-	return
+	return l, err
 }
+
+//func NewClient(results CLI.CLIResults) (l *ldap.Conn, err error) {
+//	ldaps := results.Ldaps
+//	protocol := "ldap://"
+//	if ldaps {
+//		protocol = "ldaps://"
+//	}
+//	kerb := results.Kerberos
+//	user := results.Username
+//	password := results.Password
+//	ntlm := strings.ToUpper(results.NtlmHash)
+//	dc := results.DC
+//	if dc == "" {
+//		dc = results.Domain
+//	}
+//	domain := results.Domain
+//	if domain == "" {
+//		err = errors.New("domain not specified")
+//		return
+//	}
+//	ldapURL := fmt.Sprintf("%s%s:%s", protocol, dc, results.Port)
+//	l, err = ldap.DialURL(ldapURL)
+//	if err != nil {
+//		return
+//	}
+//
+//	if kerb {
+//		dc, err = DiscoverDC(domain, dc)
+//		if err != nil {
+//			log.Warn(fmt.Sprintf("failed to discover DC.. %v", err))
+//			//return nil, err
+//		}
+//		spn, krb5Conf := kerberos.KerberosInit(dc, domain)
+//		realm := strings.ToUpper(domain)
+//		client := gssapi.Client{
+//			Client: krb5client.NewWithPassword(user, realm, password, krb5Conf, krb5client.DisablePAFXFAST(true)),
+//		}
+//		err = l.GSSAPIBindRequest(&client, &ldap.GSSAPIBindRequest{
+//			ServicePrincipalName: spn,
+//			AuthZID:              "",
+//		})
+//		if err == nil {
+//			return
+//		}
+//		log.Info("Falling back to ntlm auth..")
+//	}
+//	if password != "" {
+//		err = l.Bind(user, password)
+//	} else {
+//		err = l.NTLMBindWithHash(domain, user, ntlm)
+//	}
+//
+//	return
+//}
 
 type ManagedPasswordBlob struct {
 	Version                         uint16
